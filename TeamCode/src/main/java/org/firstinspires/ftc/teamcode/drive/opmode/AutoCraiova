@@ -1,0 +1,521 @@
+package org.firstinspires.ftc.teamcode.drive.opmode;
+//importam librariile de care avem nevoie din SDK - First Tech Challenge
+import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.config.Config;
+import com.qualcomm.hardware.bosch.BNO055IMU;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import androidx.annotation.NonNull;
+import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.config.Config;
+import com.acmerobotics.roadrunner.AccelConstraint;
+import com.acmerobotics.roadrunner.Arclength;
+import com.acmerobotics.roadrunner.MinMax;
+import com.acmerobotics.roadrunner.Pose2d;
+import com.acmerobotics.roadrunner.Pose2dDual;
+import com.acmerobotics.roadrunner.PosePath;
+import com.acmerobotics.roadrunner.TranslationalVelConstraint;
+import com.acmerobotics.roadrunner.Vector2d;
+import com.acmerobotics.roadrunner.ftc.Actions;
+import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.DigitalChannel;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
+import com.qualcomm.robotcore.util.ElapsedTime;
+import org.firstinspires.ftc.teamcode.tuning.arm;
+import org.firstinspires.ftc.teamcode.MecanumDrive;
+import com.qualcomm.robotcore.util.ElapsedTime;
+
+@Config
+//declarăm tipul de clasă (mod autonom sau mod teleop, in care precizam si numele "Auto Craiova" - acesta va aparea si pe driver station, la selectia modului)
+@Autonomous(name = "Auto Craiova", group = "Test")
+public class SplineTest extends LinearOpMode {
+
+
+    // Declaram coeficientii PIDF, din algoritmul PIDF pentru ridicarea bratului
+    public static double kP = 0.002;
+    public static double kI = 0.0;
+    public static double kD = 0.0;
+    public static double kF = 0.13;
+
+    // Se precizeaza tinta pentru motoare (ridica1 si ridica2)
+    public static int targetPosition = 600;
+
+    private DcMotorEx ridica1, ridica2; //se declara numele motoarelor
+    private double integralSum = 0.0; //initializam parametri din algoritmul PID
+    private double lastError = 0.0;
+    private long lastUpdateTime = 0;
+
+    private volatile boolean puneLaCosDone = false; //initializez o variabila care sa urmareasca finalizarea operatiei de punere in cos
+    private volatile boolean griper_vertical = false;
+    private boolean targetReached = false;
+    private boolean liftArmActive = false; // Flag to toggle arm lifting
+    private boolean isArmRaised = false; // Flag to track if the arm is raised
+    private BNO055IMU imu;
+    ElapsedTime timp;
+    private ElapsedTime armTimer = new ElapsedTime(); // Timer pentru starea brațului
+
+    //private volatile boolean puneLaCosDone = false;
+    //private volatile boolean griper_vertical = false;
+    //ElapsedTime timp;
+    private Servo rotatie1, rotatie2; //denumesc servomotoarele
+    private DcMotor ridica3;
+
+    private DigitalChannel digitalTouch; //declaram senzorul de la gripper
+    private CRServo pgrip, rgrip;
+
+    private final int DEAD_ZONE = 200; //stabilim zone in care griperul trebuie sa stea sus
+    private final int MAX_EXTENSION = 1400; //extindere maxima
+    private final double START_GRIPPER_POSITION = 0.61;
+    private final double END_GRIPPER_POSITION = 0.68;
+
+    private Servo curatenie;
+
+    private boolean curatenieEfectuata = false;
+    private MecanumDrive drive; //apelam configuratia hardware a motoarelor si alti parametri
+    //boolean targetReached = false;
+    //definim 4 stari masina pentru prinderea elementelor (starea initiala este IDLE)
+    private enum PrindeElemState {
+        IDLE,
+        RUNNING_GRIPPER,
+        RETRACTING,
+        DONE
+    }
+    private PrindeElemState prindeElemState = PrindeElemState.IDLE;
+    private ElapsedTime gripperTimer = new ElapsedTime();
+    @Override
+    //initializam mai multe elemente hardware
+    public void runOpMode() {
+        // Initialize motors
+        rotatie1 = hardwareMap.get(Servo.class, "rotatie1");
+        rotatie2 = hardwareMap.get(Servo.class, "rotatie2");
+        ridica3 = hardwareMap.get(DcMotor.class, "ridica3");
+        ridica1 = hardwareMap.get(DcMotorEx.class, "ridica1");
+        ridica2 = hardwareMap.get(DcMotorEx.class, "ridica2");
+
+        ridica2.setDirection(DcMotorEx.Direction.REVERSE);
+        ridica1.setMode(DcMotorEx.RunMode.STOP_AND_RESET_ENCODER);
+        ridica2.setMode(DcMotorEx.RunMode.STOP_AND_RESET_ENCODER);
+        ridica1.setMode(DcMotorEx.RunMode.RUN_WITHOUT_ENCODER);
+        ridica2.setMode(DcMotorEx.RunMode.RUN_WITHOUT_ENCODER);
+        digitalTouch = hardwareMap.get(DigitalChannel.class, "digitalTouch");
+        pgrip = hardwareMap.get(CRServo.class, "pgrip");
+        rgrip = hardwareMap.get(CRServo.class, "rgrip");
+        pgrip.setDirection(DcMotorSimple.Direction.REVERSE);
+        rgrip.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        rotatie1.setDirection(Servo.Direction.REVERSE);
+        ridica3.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        ridica3.setDirection(DcMotor.Direction.FORWARD);
+        ridica3.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        // Inițializăm servomotorul curatenie
+        curatenie = hardwareMap.get(Servo.class, "curatenie");
+        curatenie.setDirection(Servo.Direction.REVERSE);
+        curatenie.setPosition(0); // Poziția inițială
+
+        // Attach FTC Dashboard
+        FtcDashboard dashboard = FtcDashboard.getInstance();
+        telemetry = dashboard.getTelemetry();
+
+
+        // Initialize the MecanumDrive with HardwareMap and a starting Pose2d
+        Pose2d startPose = new Pose2d(36, 60, Math.toRadians(-180));  // Starting at (36, 60), heading 0
+        drive = new MecanumDrive(hardwareMap, startPose);
+        //rotation1.setPosition(0.5); // Reverse servo, initial position
+        //rotation2.setPosition(0.5);
+        //ridica1.setPower(0);
+        //ridica2.setPower(0);  // Set reverse motor to 0 initially
+        ridica3.setPower(0);  // Set reverse motor to 0 initially
+        timp = new ElapsedTime();
+
+        // se executa dupa ce se apasa butonul de START
+        waitForStart();
+        // Main control loop
+        while (opModeIsActive()) {
+            //execut primul traseu (in paralel 3 actiuni)
+            executeInParallel3(
+                    this::ridica_brat,  // Action 1
+                    this::moveToP1,
+                    () -> delayAndRun(1000, this::pune_la_cos)
+            );
+
+            executeInParallel2(
+                    this::coboara_brat_withRunToPosition,  // Action 1
+                    this::moveToP2
+            );
+            prinde_elem();
+
+
+            executeInParallel3(
+                    this::ridica_brat,  // Action 1
+                    this::moveToP2_1,
+                    () -> delayAndRun(1000, this::pune_la_cos)
+            );
+
+            executeInParallel2(
+                    this::coboara_brat_withRunToPosition,  // Action 1
+                    this::moveToP3
+            );
+            prinde_elem();
+
+            executeInParallel3(
+                    this::ridica_brat,  // Action 1
+                    this::moveToP3_1,
+                    () -> delayAndRun(1000, this::pune_la_cos)
+            );
+
+            executeInParallel2(
+                    this::coboara_brat_withRunToPosition,  // Action 1
+                    this::moveToP4
+            );
+            prinde_elem();
+            executeInParallel3(
+                    this::ridica_brat,  // Action 1
+                    this::moveToP4_1,
+                    () -> delayAndRun(1000, this::pune_la_cos)
+            );
+
+            coboara_brat_withRunToPosition();
+            break;
+
+
+
+        }
+    }
+
+    // Helper method to execute two actions in parallel
+    private void executeInParallel2(Runnable action1, Runnable action2) {
+        // Create two separate threads for the actions
+        Thread thread1 = new Thread(action1); // Task 1
+        Thread thread2 = new Thread(action2); // Task 2
+
+        // Start both threads
+        thread1.start();
+        thread2.start();
+
+        // Optionally wait for both threads to finish (join them)
+        try {
+            thread1.join(); // Wait for Task 1 to finish
+            thread2.join(); // Wait for Task 2 to finish
+        } catch (InterruptedException e) {
+            telemetry.addData("Error", "Thread interrupted: " + e.getMessage());
+            telemetry.update();
+        }
+    }
+
+    private void executeInParallel3(Runnable action1, Runnable action2, Runnable action3) {
+        // Create two separate threads for the actions
+        Thread thread1 = new Thread(action1); // Task 1
+        Thread thread2 = new Thread(action2); // Task 2
+        Thread thread3 = new Thread(action3); // Task 2
+
+        // Start both threads
+        thread1.start();
+        thread2.start();
+        thread3.start();
+
+        // Optionally wait for both threads to finish (join them)
+        try {
+            thread1.join(); // Wait for Task 1 to finish
+            thread2.join(); // Wait for Task 2 to finish
+            thread3.join(); // Wait for Task 2 to finish
+        } catch (InterruptedException e) {
+            telemetry.addData("Error", "Thread interrupted: " + e.getMessage());
+            telemetry.update();
+        }
+    }
+
+
+    private void executeInParallel4(Runnable action1, Runnable action2, Runnable action3, Runnable action4) {
+        // Create two separate threads for the actions
+        Thread thread1 = new Thread(action1); // Task 1
+        Thread thread2 = new Thread(action2); // Task 2
+        Thread thread3 = new Thread(action3); // Task 2
+        Thread thread4 = new Thread(action4); // Task 2
+
+        // Start both threads
+        thread1.start();
+        thread2.start();
+        thread3.start();
+        thread4.start();
+
+        // Optionally wait for both threads to finish (join them)
+        try {
+            thread1.join(); // Wait for Task 1 to finish
+            thread2.join(); // Wait for Task 2 to finish
+            thread3.join(); // Wait for Task 2 to finish
+            thread4.join(); // Wait for Task 2 to finish
+        } catch (InterruptedException e) {
+            telemetry.addData("Error", "Thread interrupted: " + e.getMessage());
+            telemetry.update();
+        }
+    }
+
+
+    private void moveToP1() {
+        Pose2d beginPose = new Pose2d(36, 60, Math.toRadians(-180));
+        Actions.runBlocking(
+                drive.actionBuilder(beginPose)
+                        .setReversed(true)
+                        .strafeToSplineHeading(new Vector2d(54, 53), Math.toRadians(-130))
+                        .build());
+    }
+
+    private void moveToP2() {
+        Pose2d stop2 = new Pose2d(53, 54, Math.toRadians(-130));  // Start at P1(36, 60), heading 0
+        Actions.runBlocking(
+                drive.actionBuilder(stop2)
+                        .setReversed(false)
+                        .strafeToSplineHeading(new Vector2d(45, 47), Math.toRadians(-85))
+                        .build());
+    }
+
+
+    private void moveToP2_1() {
+        Pose2d beginPose = new Pose2d(45, 47, Math.toRadians(-85));  // Start at P1(36, 60), heading 0
+        Actions.runBlocking(
+                drive.actionBuilder(beginPose)
+                        .setReversed(true)
+                        .strafeToSplineHeading(new Vector2d(53, 54), Math.toRadians(-135))
+                        .build());
+
+    }
+
+
+
+    private void moveToP3() {
+        Pose2d beginPose = new Pose2d(53, 54, Math.toRadians(-135));  // Start at P1(36, 60), heading 0
+        Actions.runBlocking(
+                drive.actionBuilder(beginPose)
+                        .setReversed(false)
+                        .strafeToSplineHeading(new Vector2d(55, 49), Math.toRadians(-90))  // Move to P2(51, 60)
+                        .build());
+    }
+
+    private void moveToP3_1() {
+        Pose2d beginPose = new Pose2d(55, 49, Math.toRadians(-90));  // Start at P1(36, 60), heading 0
+        Actions.runBlocking(
+                drive.actionBuilder(beginPose)
+                        .setReversed(true)
+                        //.strafeToSplineHeading(new Vector2d(49, 50), Math.toRadians(45))// Move to P2(51, 60)
+                        .strafeToSplineHeading(new Vector2d(53, 54), Math.toRadians(-135))
+                        .build());
+
+    }
+
+    private void moveToP4() {
+        Pose2d beginPose = new Pose2d(53, 54, Math.toRadians(-135));  // Start at P1(36, 60), heading 0
+        Actions.runBlocking(
+                drive.actionBuilder(beginPose)
+                        .setReversed(false)
+                        .strafeToSplineHeading(new Vector2d(57.5, 49), Math.toRadians(-75))  // Move to P2(51, 60)
+                        .build());
+    }
+
+    private void moveToP4_1() {
+        Pose2d beginPose = new Pose2d(57.5, 49, Math.toRadians(-75));  // Start at P1(36, 60), heading 0
+        Actions.runBlocking(
+                drive.actionBuilder(beginPose)
+                        .setReversed(false)
+                        //.strafeToSplineHeading(new Vector2d(49, 50), Math.toRadians(45))// Move to P2(51, 60)
+                        .strafeToSplineHeading(new Vector2d(53, 54), Math.toRadians(-135), new TranslationalVelConstraint(50))
+                        .build());
+
+    }
+
+    private void pune_la_cos() {
+
+        ridica3.setDirection(DcMotor.Direction.FORWARD);
+        ridica3.setTargetPosition(900);
+        ridica3.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        ridica3.setPower(1);
+        timp.reset();
+        while (timp.milliseconds() < 800 && opModeIsActive()) {
+            puneLaCosDone = false;
+        }
+        ridica3.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        timp.reset();
+        pgrip.setPower(-0.3); // eliberam elementul
+        rgrip.setPower(0.3);
+        timp.reset();
+        while (timp.milliseconds() < 400 && opModeIsActive()) {
+            puneLaCosDone = false;
+        }
+        rgrip.setPower(0);
+        pgrip.setPower(0);
+        timp.reset();
+        while (timp.milliseconds() < 400 && opModeIsActive()) {
+            puneLaCosDone = false;
+        }
+        ridica3.setDirection(DcMotor.Direction.REVERSE);
+        ridica3.setTargetPosition(0);
+        ridica3.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        ridica3.setPower(1);
+        ridica3.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        while (timp.milliseconds() < 500 && opModeIsActive()) {
+            puneLaCosDone = false;
+        }
+        puneLaCosDone = true;
+
+    }
+
+
+    private void delayAndRun(long delayMillis, Runnable action) {
+        // Run the action after a delay using a new thread
+        new Thread(() -> {
+            try {
+                Thread.sleep(delayMillis); // Sleep for the delay duration
+                action.run(); // Execute the action after the delay
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt(); // Restore the interrupted status
+            }
+        }).start();
+    }
+
+    private void prinde_elem() {
+        ridica3.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        gripperTimer.reset();
+        while(gripperTimer.milliseconds() <= 3000 && digitalTouch.getState())
+        {
+            pgrip.setPower(0.5);
+            rgrip.setPower(-0.5);
+            ridica3.setDirection(DcMotor.Direction.FORWARD);
+            ridica3.setTargetPosition(1380);
+            ridica3.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+            ridica3.setPower(0.6);
+            int currentPos = ridica3.getCurrentPosition();
+            double gripperPosition = START_GRIPPER_POSITION + (currentPos / (double) MAX_EXTENSION) * (END_GRIPPER_POSITION - START_GRIPPER_POSITION);
+            // Continuously update servo positions
+            rotatie1.setPosition(gripperPosition);
+            rotatie2.setPosition(gripperPosition);
+        }
+        gripperTimer.reset();
+        while(gripperTimer.milliseconds() <= 1000)
+        {
+            pgrip.setPower(0);
+            rgrip.setPower(0);
+            rotatie1.setPosition(0.2);
+            rotatie2.setPosition(0.2);
+            ridica3.setDirection(DcMotor.Direction.REVERSE);
+            ridica3.setTargetPosition(0);
+            ridica3.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+            ridica3.setPower(0.9);
+        }
+        griper_vertical = false;
+
+    }
+    /**
+     * Calculate the elapsed time in seconds since the last update.
+     */
+    private double getDeltaTime() {
+        long currentTime = System.currentTimeMillis();
+        double deltaTime = (currentTime - lastUpdateTime) / 1000.0;
+        return deltaTime == 0 ? 0.02 : deltaTime; // Default to 20ms if deltaTime is 0
+    }
+
+
+    public void ridica_brat() {
+        while (!puneLaCosDone && opModeIsActive()) {
+            // Get current position
+            int currentPosition = ridica1.getCurrentPosition();
+            int pozitie = -currentPosition;
+
+            // Calculate PIDF output
+            double error = targetPosition - pozitie;
+            integralSum += error * getDeltaTime();
+            double derivative = (error - lastError) / getDeltaTime();
+            double output = kP * error + kI * integralSum + kD * derivative + kF;
+
+            // Apply power to motors (clamped to [-1, 1])
+            double clampedPower = Math.max(-1.0, Math.min(1.0, output));
+            ridica1.setPower(-clampedPower);
+            ridica2.setPower(-clampedPower);
+
+            // Update telemetry for monitoring
+            telemetry.addData("Target Position", targetPosition);
+            telemetry.addData("Current Position", currentPosition);
+            telemetry.addData("Error", error);
+            telemetry.addData("Integral Sum", integralSum);
+            telemetry.addData("Derivative", derivative);
+            telemetry.addData("Motor Power", clampedPower);
+            telemetry.addData("Holding Target Position", targetReached);
+            telemetry.update();
+
+            // Update last error and time
+            lastError = error;
+            lastUpdateTime = System.currentTimeMillis();
+
+
+            if(!griper_vertical && Math.abs(currentPosition)>150)
+            {
+                rotatie1.setPosition(0.61);
+                rotatie2.setPosition(0.61);
+                griper_vertical = true;
+            }
+
+            // Yield control to allow other threads to execute
+            try {
+                Thread.sleep(10); // Small delay to allow other tasks to run
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break; // Exit if the thread is interrupted
+            }
+        }
+    }
+
+    public void coboara_brat_withRunToPosition() {
+        // Set the target position for both motors to 0 (initial position)
+        ridica1.setTargetPosition(0);
+        ridica2.setTargetPosition(0);
+
+        // Ensure motors are in RUN_TO_POSITION mode
+        ridica1.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+        ridica2.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+
+        // Set the motor power (this controls the speed of movement)
+        double power = 0.2; // Increased speed for faster lowering
+        ridica1.setPower(power);
+        ridica2.setPower(power);
+        rotatie1.setPosition(0.2);
+        rotatie2.setPosition(0.2);
+
+        // Set a timeout of 1 second
+        ElapsedTime timer = new ElapsedTime();
+        while (opModeIsActive() && timer.milliseconds() < 1500) {
+            int pos1 = Math.abs(ridica1.getCurrentPosition());
+            int pos2 = Math.abs(ridica2.getCurrentPosition());
+
+            telemetry.addData("Lowering Arm...", "Time: %.2f sec", timer.seconds());
+            telemetry.addData("Position ridica1", pos1);
+            telemetry.addData("Position ridica2", pos2);
+            telemetry.update();
+
+            // Stop early if both motors reach position 20
+            if (pos1 <= 20 && pos2 <= 20) {
+                break;
+            }
+
+            sleep(10); // Prevent CPU overloading
+        }
+
+        // Stop the motors once timeout occurs or position is reached
+        ridica1.setPower(0);
+        ridica2.setPower(0);
+
+        // Reset the motor mode back to RUN_WITHOUT_ENCODER for other operations
+        ridica1.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        ridica2.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        puneLaCosDone = false;
+    }
+
+
+
+
+
+}
